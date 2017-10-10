@@ -12,12 +12,8 @@ import (
 	"github.com/git-lfs/git-lfs/config"
 	"github.com/git-lfs/git-lfs/localstorage"
 	"github.com/git-lfs/git-lfs/tools"
-	"github.com/git-lfs/git-lfs/transfer"
+	"github.com/git-lfs/git-lfs/tq"
 	"github.com/rubyist/tracerx"
-)
-
-const (
-	Version = "1.5.0"
 )
 
 var (
@@ -67,7 +63,7 @@ func ObjectExistsOfSize(oid string, size int64) bool {
 	return tools.FileExistsOfSize(path, size)
 }
 
-func Environ(cfg *config.Configuration, manifest *transfer.Manifest) []string {
+func Environ(cfg *config.Configuration, manifest *tq.Manifest) []string {
 	osEnviron := os.Environ()
 	env := make([]string, 0, len(osEnviron)+7)
 
@@ -120,6 +116,11 @@ func Environ(cfg *config.Configuration, manifest *transfer.Manifest) []string {
 	}
 
 	return env
+}
+
+// TransferManifest builds a tq.Manifest using the given cfg.
+func TransferManifest(cfg *config.Configuration) *tq.Manifest {
+	return tq.NewManifestWithGitEnv(cfg.Access("download"), cfg.Git)
 }
 
 func InRepo() bool {

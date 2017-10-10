@@ -6,6 +6,7 @@ import (
 	"github.com/git-lfs/git-lfs/errors"
 	"github.com/git-lfs/git-lfs/lfs"
 	"github.com/git-lfs/git-lfs/tools"
+	"github.com/git-lfs/git-lfs/tq"
 )
 
 var uploadMissingErr = "%s does not exist in .git/lfs/objects. Tried %s, which matches %s."
@@ -34,13 +35,12 @@ func (c *uploadContext) HasUploaded(oid string) bool {
 	return c.uploadedOids.Contains(oid)
 }
 
-func (c *uploadContext) prepareUpload(unfiltered []*lfs.WrappedPointer) (*lfs.TransferQueue, []*lfs.WrappedPointer) {
+func (c *uploadContext) prepareUpload(unfiltered []*lfs.WrappedPointer) (*tq.TransferQueue, []*lfs.WrappedPointer) {
 	numUnfiltered := len(unfiltered)
 	uploadables := make([]*lfs.WrappedPointer, 0, numUnfiltered)
 	missingLocalObjects := make([]*lfs.WrappedPointer, 0, numUnfiltered)
-	numObjects := 0
-	totalSize := int64(0)
 	missingSize := int64(0)
+	meter := buildProgressMeter(c.DryRun)
 
 	// XXX(taylor): temporary measure to fix duplicate (broken) results from
 	// scanner
@@ -56,11 +56,9 @@ func (c *uploadContext) prepareUpload(unfiltered []*lfs.WrappedPointer) (*lfs.Tr
 		}
 		uniqOids.Add(p.Oid)
 
-		// increment numObjects and totalSize early (even if it's not
-		// going into uploadables), since we will call Skip() based on
-		// the results of the download check queue
-		numObjects += 1
-		totalSize += p.Size
+		// estimate in meter early (even if it's not going into uploadables), since
+		// we will call Skip() based on the results of the download check queue.
+		meter.Add(p.Size)
 
 		if lfs.ObjectExistsOfSize(p.Oid, p.Size) {
 			uploadables = append(uploadables, p)
@@ -77,7 +75,7 @@ func (c *uploadContext) prepareUpload(unfiltered []*lfs.WrappedPointer) (*lfs.Tr
 
 	// build the TransferQueue, automatically skipping any missing objects that
 	// the server already has.
-	uploadQueue := lfs.NewUploadQueue(numObjects, totalSize, c.DryRun)
+	uploadQueue := newUploadQueue(tq.WithProgress(meter), tq.DryRun(c.DryRun))
 	for _, p := range missingLocalObjects {
 		if c.HasUploaded(p.Oid) {
 			// if the server already has this object, call Skip() on
@@ -101,7 +99,7 @@ func (c *uploadContext) checkMissing(missing []*lfs.WrappedPointer, missingSize 
 		return
 	}
 
-	checkQueue := lfs.NewDownloadCheckQueue(numMissing, missingSize)
+	checkQueue := newDownloadCheckQueue()
 	transferCh := checkQueue.Watch()
 
 	done := make(chan int)
@@ -115,7 +113,7 @@ func (c *uploadContext) checkMissing(missing []*lfs.WrappedPointer, missingSize 
 	}()
 
 	for _, p := range missing {
-		checkQueue.Add(lfs.NewDownloadable(p))
+		checkQueue.Add(downloadTransfer(p))
 	}
 
 	// Currently this is needed to flush the batch but is not enough to sync
@@ -142,7 +140,7 @@ func uploadPointers(c *uploadContext, unfiltered []*lfs.WrappedPointer) {
 
 	q, pointers := c.prepareUpload(unfiltered)
 	for _, p := range pointers {
-		u, err := lfs.NewUploadable(p.Oid, p.Name)
+		t, err := uploadTransfer(p.Oid, p.Name)
 		if err != nil {
 			if errors.IsCleanPointerError(err) {
 				Exit(uploadMissingErr, p.Oid, p.Name, errors.GetContext(err, "pointer").(*lfs.Pointer).Oid)
@@ -151,7 +149,7 @@ func uploadPointers(c *uploadContext, unfiltered []*lfs.WrappedPointer) {
 			}
 		}
 
-		q.Add(u)
+		q.Add(t.Name, t.Path, t.Oid, t.Size)
 		c.SetUploaded(p.Oid)
 	}
 

@@ -14,7 +14,9 @@ import (
 	"github.com/git-lfs/git-lfs/config"
 	"github.com/git-lfs/git-lfs/errors"
 	"github.com/git-lfs/git-lfs/lfs"
+	"github.com/git-lfs/git-lfs/progress"
 	"github.com/git-lfs/git-lfs/test"
+	"github.com/git-lfs/git-lfs/tq"
 	"github.com/spf13/cobra"
 )
 
@@ -137,6 +139,7 @@ func buildTestData() (oidsExist, oidsMissing []TestObject, err error) {
 	const oidCount = 50
 	oidsExist = make([]TestObject, 0, oidCount)
 	oidsMissing = make([]TestObject, 0, oidCount)
+	meter := progress.NewMeter(progress.WithOSEnv(config.Config.Os))
 
 	// Build test data for existing files & upload
 	// Use test repo for this to simplify the process of making sure data matches oid
@@ -147,25 +150,24 @@ func buildTestData() (oidsExist, oidsMissing []TestObject, err error) {
 	defer repo.Cleanup()
 	// just one commit
 	commit := test.CommitInput{CommitterName: "A N Other", CommitterEmail: "noone@somewhere.com"}
-	var totalSize int64
 	for i := 0; i < oidCount; i++ {
 		filename := fmt.Sprintf("file%d.dat", i)
 		sz := int64(rand.Intn(200)) + 50
 		commit.Files = append(commit.Files, &test.FileInput{Filename: filename, Size: sz})
-		totalSize += sz
+		meter.Add(sz)
 	}
 	outputs := repo.AddCommits([]*test.CommitInput{&commit})
 
 	// now upload
-	uploadQueue := lfs.NewUploadQueue(len(oidsExist), totalSize, false)
+	uploadQueue := lfs.NewUploadQueue(config.Config, tq.WithProgress(meter))
 	for _, f := range outputs[0].Files {
 		oidsExist = append(oidsExist, TestObject{Oid: f.Oid, Size: f.Size})
 
-		u, err := lfs.NewUploadable(f.Oid, "Test file")
+		t, err := uploadTransfer(f.Oid, "Test file")
 		if err != nil {
 			return nil, nil, err
 		}
-		uploadQueue.Add(u)
+		uploadQueue.Add(t.Name, t.Path, t.Oid, t.Size)
 	}
 	uploadQueue.Wait()
 
@@ -281,6 +283,25 @@ func interleaveTestData(slice1, slice2 []TestObject) []TestObject {
 		}
 	}
 	return ret
+}
+
+func uploadTransfer(oid, filename string) (*tq.Transfer, error) {
+	localMediaPath, err := lfs.LocalMediaPath(oid)
+	if err != nil {
+		return nil, errors.Wrapf(err, "Error uploading file %s (%s)", filename, oid)
+	}
+
+	fi, err := os.Stat(localMediaPath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "Error uploading file %s (%s)", filename, oid)
+	}
+
+	return &tq.Transfer{
+		Name: filename,
+		Path: localMediaPath,
+		Oid:  oid,
+		Size: fi.Size(),
+	}, nil
 }
 
 func init() {
